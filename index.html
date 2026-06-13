@@ -1679,8 +1679,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
     _ruianDebounce = setTimeout(async ()=>{
       try{
         const url = 'http://13.60.62.57/api/suggest?q='+encodeURIComponent(q);
-        const proxyUrl = 'https://corsproxy.io/?'+encodeURIComponent(url);
-        const r = await fetch(proxyUrl, {signal: AbortSignal.timeout(6000)});
+        const r = await proxyFetch(url, 6000);
         const data = await r.json();
         _ruianSuggestions = data.suggestions || [];
         renderRuianDrop();
@@ -1712,6 +1711,25 @@ function ruianPickSug(i){
   document.getElementById('ruian-drop').style.display='none';
 }
 
+// Proxy helper - zkouší více CORS proxy pro HTTP IP adresy
+async function proxyFetch(url, timeoutMs=8000, opts={}){
+  const proxies = [
+    u => 'https://api.allorigins.win/raw?url='+encodeURIComponent(u),
+    u => 'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(u),
+    u => 'https://thingproxy.freeboard.io/fetch/'+u,
+  ];
+  for(const proxy of proxies){
+    try{
+      const proxyUrl = proxy(url);
+      const fetchOpts = {...opts, signal: AbortSignal.timeout(timeoutMs)};
+      // Pro POST přes allorigins použijeme GET s obsahem v URL (jen pro CSRF+suggest)
+      const r = await fetch(proxyUrl, fetchOpts);
+      if(r.ok) return r;
+    }catch(_){}
+  }
+  throw new Error('Všechny proxy selhaly');
+}
+
 async function ruianSimpleSearch(){
   const inp     = document.getElementById('ruian-addr-inp');
   const btn     = document.getElementById('ruian-search-btn');
@@ -1728,8 +1746,7 @@ async function ruianSimpleSearch(){
   try{
     // Suggest přes proxy
     if(!_ruianMagicKey){
-      const sUrl = 'https://corsproxy.io/?'+encodeURIComponent('http://13.60.62.57/api/suggest?q='+encodeURIComponent(addr));
-      const sr = await fetch(sUrl, {signal: AbortSignal.timeout(8000)});
+      const sr = await proxyFetch('http://13.60.62.57/api/suggest?q='+encodeURIComponent(addr), 8000);
       const sd = await sr.json();
       const suggs = sd.suggestions||[];
       if(!suggs.length) throw new Error('Adresa nenalezena v RÚIAN');
@@ -1737,17 +1754,15 @@ async function ruianSimpleSearch(){
       inp.value = suggs[0].text;
     }
     // CSRF přes proxy
-    const homeUrl = 'https://corsproxy.io/?'+encodeURIComponent('http://13.60.62.57/');
-    const homeR = await fetch(homeUrl, {signal: AbortSignal.timeout(8000)});
+    const homeR = await proxyFetch('http://13.60.62.57/', 8000);
     const homeHtml = await homeR.text();
     const csrfM = homeHtml.match(/name="csrf_token"\s+value="([^"]+)"/);
     const csrf = csrfM ? csrfM[1] : '';
     // POST /simple přes proxy
     const form = new URLSearchParams({csrf_token:csrf, magic_key:_ruianMagicKey, address:inp.value});
-    const postUrl = 'https://corsproxy.io/?'+encodeURIComponent('http://13.60.62.57/simple');
-    const postR = await fetch(postUrl, {
+    const postR = await proxyFetch('http://13.60.62.57/simple', 12000, {
       method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
-      body: form.toString(), signal: AbortSignal.timeout(12000)
+      body: form.toString()
     });
     const html = await postR.text();
     // Parsuj výsledek
