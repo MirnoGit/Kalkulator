@@ -1622,24 +1622,154 @@ async function tryFetchSimple(adresa){
 }
 
 function openRuianApi(){
-  const addr = window._addr?.adresa || '';
-  const panel = document.getElementById('ruian-popup-panel');
+  const box = document.getElementById('ruian-inline');
+  const inp = document.getElementById('ruian-addr-inp');
+  if(!box) return;
+  box.style.display = 'block';
+  if(inp && window._addr?.adresa){
+    inp.value = window._addr.adresa;
+    ruianSimpleSearch();
+  } else {
+    inp?.focus();
+  }
+}
 
-  // Zkopíruj adresu do schránky
-  if(addr) navigator.clipboard?.writeText(addr).catch(()=>{});
+// Autocomplete pro inline RUIAN pole
+let _ruianDebounce = null;
+let _ruianSuggestions = [];
+let _ruianMagicKey = '';
+let _ruianLastData = null;
 
-  // Otevři popup
-  const features = 'width=900,height=750,left=100,top=60,resizable=yes,scrollbars=yes';
-  _ruianPopupWin = window.open('http://13.60.62.57/simple', 'ruian_simple', features);
-  if(panel) panel.style.display = 'block';
+document.addEventListener('DOMContentLoaded', ()=>{
+  const inp  = document.getElementById('ruian-addr-inp');
+  const drop = document.getElementById('ruian-drop');
+  if(!inp) return;
+  inp.addEventListener('input', ()=>{
+    _ruianMagicKey = '';
+    const q = inp.value.trim();
+    if(q.length < 3){ drop.style.display='none'; return; }
+    clearTimeout(_ruianDebounce);
+    _ruianDebounce = setTimeout(async ()=>{
+      try{
+        const url = 'http://13.60.62.57/api/suggest?q='+encodeURIComponent(q);
+        const proxyUrl = 'https://corsproxy.io/?'+encodeURIComponent(url);
+        const r = await fetch(proxyUrl, {signal: AbortSignal.timeout(6000)});
+        const data = await r.json();
+        _ruianSuggestions = data.suggestions || [];
+        renderRuianDrop();
+      }catch(_){ drop.style.display='none'; }
+    }, 300);
+  });
+  document.addEventListener('click', e=>{
+    if(!e.target.closest('#ruian-inline')) drop.style.display='none';
+  });
+});
 
-  // Sleduj zavření
-  const t = setInterval(()=>{
-    if(_ruianPopupWin && _ruianPopupWin.closed){
-      clearInterval(t);
-      document.getElementById('ruian-popup-val')?.focus();
+function renderRuianDrop(){
+  const drop = document.getElementById('ruian-drop');
+  if(!drop || !_ruianSuggestions.length){ if(drop) drop.style.display='none'; return; }
+  drop.innerHTML = _ruianSuggestions.map((s,i)=>`
+    <div onclick="ruianPickSug(${i})" style="padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--gray-100);font-size:12.5px"
+      onmouseover="this.style.background='var(--gray-50)'" onmouseout="this.style.background=''">
+      <div style="font-weight:600">${esc(s.text)}</div>
+      <div style="font-size:11px;color:var(--gray-400)">${esc(s.type||'')}</div>
+    </div>`).join('');
+  drop.style.display='block';
+}
+
+function ruianPickSug(i){
+  const s = _ruianSuggestions[i];
+  if(!s) return;
+  document.getElementById('ruian-addr-inp').value = s.text;
+  _ruianMagicKey = s.magic_key;
+  document.getElementById('ruian-drop').style.display='none';
+}
+
+async function ruianSimpleSearch(){
+  const inp     = document.getElementById('ruian-addr-inp');
+  const btn     = document.getElementById('ruian-search-btn');
+  const resDiv  = document.getElementById('ruian-inline-result');
+  const errDiv  = document.getElementById('ruian-inline-err');
+  const dataDiv = document.getElementById('ruian-inline-data');
+  if(!inp) return;
+  const addr = inp.value.trim();
+  if(!addr){ if(errDiv){errDiv.style.display='block';errDiv.textContent='Zadejte adresu';} return; }
+  if(btn){ btn.textContent='Vyhledávám…'; btn.disabled=true; }
+  if(resDiv) resDiv.style.display='none';
+  if(errDiv) errDiv.style.display='none';
+
+  try{
+    // Suggest přes proxy
+    if(!_ruianMagicKey){
+      const sUrl = 'https://corsproxy.io/?'+encodeURIComponent('http://13.60.62.57/api/suggest?q='+encodeURIComponent(addr));
+      const sr = await fetch(sUrl, {signal: AbortSignal.timeout(8000)});
+      const sd = await sr.json();
+      const suggs = sd.suggestions||[];
+      if(!suggs.length) throw new Error('Adresa nenalezena v RÚIAN');
+      _ruianMagicKey = suggs[0].magic_key;
+      inp.value = suggs[0].text;
     }
-  }, 500);
+    // CSRF přes proxy
+    const homeUrl = 'https://corsproxy.io/?'+encodeURIComponent('http://13.60.62.57/');
+    const homeR = await fetch(homeUrl, {signal: AbortSignal.timeout(8000)});
+    const homeHtml = await homeR.text();
+    const csrfM = homeHtml.match(/name="csrf_token"\s+value="([^"]+)"/);
+    const csrf = csrfM ? csrfM[1] : '';
+    // POST /simple přes proxy
+    const form = new URLSearchParams({csrf_token:csrf, magic_key:_ruianMagicKey, address:inp.value});
+    const postUrl = 'https://corsproxy.io/?'+encodeURIComponent('http://13.60.62.57/simple');
+    const postR = await fetch(postUrl, {
+      method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body: form.toString(), signal: AbortSignal.timeout(12000)
+    });
+    const html = await postR.text();
+    // Parsuj výsledek
+    const get = re => html.match(re)?.[1]?.trim()||null;
+    const plocha  = parseInt(get(/Zastav[eě]n[aá][^<]*<[^>]*>\s*([\d]+)\s*m/i)||'0')||null;
+    const podlazi = parseInt(get(/Podla[žz][ií][^:]*<[^>]*>\s*([\d]+)/i)||'0')||null;
+    const rokStr  = get(/Dokon[čc]en[ií][^<]*<[^>]*>\s*(\d{4})/i);
+    const rok     = rokStr ? parseInt(rokStr) : null;
+    const konstr  = get(/Konstrukce[^:]*:\s*<[^>]*>([^<]+)</i);
+    const vyuziti = get(/Vyu[žz]it[ií][^:]*:\s*<[^>]*>([^<]+)</i);
+    if(!plocha) throw new Error('Zastavěná plocha nenalezena');
+    _ruianLastData = {plocha, podlazi, rok, konstr, vyuziti};
+    if(dataDiv) dataDiv.innerHTML = [
+      plocha   ? `<b>Zastavěná plocha:</b> ${plocha} m²` : '',
+      podlazi  ? `<b>Podlaží:</b> ${podlazi}` : '',
+      rok      ? `<b>Rok dokončení:</b> ${rok}` : '',
+      konstr   ? `<b>Konstrukce:</b> ${konstr}` : '',
+      vyuziti  ? `<b>Využití:</b> ${vyuziti}` : '',
+    ].filter(Boolean).join('<br>');
+    if(resDiv) resDiv.style.display='block';
+  }catch(e){
+    if(errDiv){ errDiv.style.display='block'; errDiv.textContent='Chyba: '+e.message; }
+    dbg('ruianSimpleSearch ERR: '+e.message);
+  }finally{
+    if(btn){ btn.textContent='Vyhledat zastavěnou plochu'; btn.disabled=false; }
+  }
+}
+
+function ruianApplyAll(){
+  if(!_ruianLastData) return;
+  const d = _ruianLastData;
+  if(d.plocha) applyRuianPlocha(d.plocha);
+  if(d.podlazi>0){ document.getElementById('pater').value=d.podlazi; setFloors(d.podlazi); document.getElementById('src-pat').textContent='← RÚIAN'; }
+  if(d.rok>1800){ document.getElementById('rok').value=d.rok; document.getElementById('src-rok').textContent='← RÚIAN'; }
+  if(d.konstr){
+    const k=d.konstr.toLowerCase();
+    const kons=k.includes('panel')?'p':k.includes('dřevo')||k.includes('drevo')?'d':k.includes('smíš')||k.includes('smis')?'s':'z';
+    document.getElementById('kons').value=kons;
+    document.querySelectorAll('#c-kons .chip').forEach(ch=>ch.classList.toggle('on',ch.dataset.v===kons));
+    document.getElementById('src-kons').textContent='← RÚIAN';
+  }
+  if(d.vyuziti){
+    const v=d.vyuziti.toLowerCase();
+    const typ=v.includes('byt')?'bd':v.includes('rekrea')?'ro':'rd';
+    document.getElementById('typ').value=typ;
+    document.querySelectorAll('#c-typ .chip').forEach(ch=>ch.classList.toggle('on',ch.dataset.v===typ));
+  }
+  document.getElementById('ruian-inline').style.display='none';
+  dbg('RÚIAN data aplikována: '+JSON.stringify(d));
 }
 
 
